@@ -1,45 +1,62 @@
-# AROL-CLOUD (SDP Projects 2023-2024 Proposal 2 - Data Generation)
+# Synthetic Sensor Data Generation for AROL Capping Devices
 
-This project builds upon the original work by Mario Deda. The primary addition is a new feature called "Data Generation." This feature enables users to define a template, from which synthetic data for chosen sensors and machineries will be generated.
+A Flask + React + MongoDB module that trains a Temporal Fusion
+Transformer per (machinery, sensor, head) on real capping-line data and
+serves synthetic sensor samples (and on-demand faults) through a REST
+API. Built as the data-generation extension to Mario Deda's AROL Cloud
+project. The main contribution sits in `./server`: the preprocessing
+pipeline for unclean industrial sensor streams, the multi-process TFT
+trainer, the sliding-window generator, and the rule-based fault
+synthesiser.
 
-## How to run project locally
+<p align="center"><img src="docs/Diagram.png" width="720"/></p>
+<p align="center"><em>System architecture: React client, Flask server, MongoDB, and the TFT training and simulation paths.</em></p>
 
-### Important note
+<p align="center"><img src="docs/22.png" width="640"/></p>
+<p align="center"><em>Client UI: pick machinery, category, sensors and fault parameters.</em></p>
 
-To run the project locally, it is essential that MongoDB is properly installed on your system. Furthermore, it is crucial to configure MongoDB to listen on the specific host and port configuration:
+## Table of Contents
 
-```
+1. [Run locally](#run-locally)
+2. [Run with Docker](#run-with-docker)
+3. [API documentation](#api-documentation)
+4. [Disclaimers and Attribution](#disclaimers-and-attribution)
+
+## Run locally
+
+MongoDB must be installed and listening on the configured host and port:
+
+```env
 MONGODB_HOST=localhost
 MONGODB_PORT=27017
 ```
 
-### Run server
+### Server
 
-Step 1: ```cd ./server```
+```bash
+cd ./server
+pip install -r requirements.txt
+python server.py
+```
 
-Step 2: ```pip install -r requirements.txt```
+### Client
 
-Step 3: ```python server.py```
+```bash
+cd ./client
+npm install --force
+npm run start
+```
 
-### Run client
+## Run with Docker
 
-Step 1: ```cd ./client```
+```bash
+cd ./Docker
+docker compose up --build
+```
 
-Step 2: ```npm install --force```
-
-Step 3: ```npm run start```
-
-## How to run project with Docker
-
-Step 1: ```Make sure you have Docker installed locally on your system```
-
-Step 2: ```cd ./Docker```
-
-Step 3: ```docker compose up --build```
-
-Step 4: ```Open Docker Desktop and make sure to run all the containers under the "arol-cloud_data_generation" container```
-
-Step 5: ```Open http://localhost:3000 on your favourite browser```
+Then open Docker Desktop and confirm the containers under
+`arol-cloud_data_generation` are running. The web client is served on
+http://localhost:3000.
 
 ## API Documentation
 
@@ -869,3 +886,66 @@ Stop a running simulation
 | samples_generated | number | true     | none         | none        |
 | faults_generated  | number | true     | none         | none        |
 | simulation_time   | number | true     | none         | none        |
+
+## Disclaimers and Attribution
+
+This repository combines third-party components with original work.
+
+**Third-party components:**
+
+- The web client, MongoDB schema, and the Flask scaffolding extend
+  [Mario Deda's AROL Cloud](https://github.com/MarioDeda)
+  project (SDP 2022-2023). The data-generation feature was added on
+  top; the surrounding UI shell is reused as is.
+- The forecasting model under the hood is the
+  [Temporal Fusion Transformer](https://arxiv.org/abs/1912.09363)
+  (Lim et al., 2019), used through the
+  [`pytorch-forecasting`](https://github.com/jdb78/pytorch-forecasting)
+  library. The model class, training loop primitives, and
+  `TimeSeriesDataSet` API are upstream and used unchanged.
+
+<p align="center"><img src="docs/threadschema.png" width="640"/></p>
+<p align="center"><em>Training and serving topology: multi-process TFT training per sensor in <code>train.py</code>, thread-pool real-time generator in <code>simulation.py</code>.</em></p>
+
+<p align="center"><img src="docs/AverageTorque_corr.png" width="640"/></p>
+<p align="center"><em>Example synthetic AverageTorque output across heads after a training sweep, illustrating preserved cross-head correlations.</em></p>
+
+**Original contributions (this PR):**
+
+- `server/modules/preprocessing.py`: `Extract` and `ExtractPlc` classes
+  for ingesting unclean industrial sensor streams from MongoDB. Handles
+  per-recording metadata, separates deterministic from
+  non-deterministic sensors, fills NaNs without leaking future
+  information, and reshapes EQTQ/DRIVE/PLC categories into a
+  per-head feature frame.
+- `server/modules/trainer.py`: a thin `Trainer` wrapper around the
+  pytorch-forecasting TFT that builds the `TimeSeriesDataSet`,
+  configures Lightning callbacks (early stopping, checkpoint,
+  TensorBoard logging), runs per-sensor learning-rate finding, and
+  exposes a clean `fit / predict / load_model` API.
+- `server/modules/generators.py`: `Generate` and `GeneratePlc` classes
+  that load a sensor's trained model, hold a rolling encoder buffer,
+  and produce one or more future samples per call. The fault generator
+  uses a configurable `mean + std * (std_param + uniform_noise)`
+  pattern for non-deterministic sensors and a bias-percentage offset
+  for deterministic ones.
+- `server/modules/config.py`: `TrainArgs`, `InferArgs`, and the
+  `EQTQ` / `DRIVE` / `PLC` dataset configs that pin down each
+  category's sensor list and grouping schema.
+- `server/train.py`: parallel multi-process training driver that
+  sweeps every (machinery, category, sensor, head) combination with
+  `torch.multiprocessing` and silences per-task TF / Lightning output.
+- `server/simulation.py`: thread-pool real-time generator that decides
+  per sensor whether to emit a normal sample or a fault, writes to
+  MongoDB through `Thread_struct`, and logs each emission.
+- `server/server.py`: Flask REST endpoints for configurations and
+  simulation control.
+
+**Why a custom preprocessing and fault-generation layer was needed.**
+The raw capping-line data is noisy, irregularly sampled, and contains
+deterministic sensors (constant set-points), low-variance sensors, and
+genuine continuous channels mixed together. Off-the-shelf TFT inputs
+assume well-conditioned, regularly sampled multivariate series; the
+preprocessing layer reshapes the data into that form, while the
+generator layer reintroduces realistic faults on the synthetic output
+so the downstream system can be exercised with collision-like events.
